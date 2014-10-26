@@ -1,0 +1,182 @@
+---
+title: "Practical Machine Learning Assignment"
+author: ""
+date: "October 26, 2014"
+bibliography: refs.bib
+csl: biomed-central.csl
+output: html_document
+---
+
+The original data-set comes from Human Activity Recognition [project][project_link], which may have many applications like monitoring weight lifting exercises, life log, or elderly monitoring. The analyzed data-set has been collected for the purpose of the study by Velloso et al. [@Velloso]. 
+
+The data-set contains the information about the quality of the exercise  execution  -- weight lifting. The goal of the following analysis is to predict the quality of the dumbbell and body movements, that helps to improve the exercise. Based on the machine learning algorithm it will be possible to give a feedback to the user who is doing the exercise. 
+
+Based on the website information: "Six young health participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E)."[@llink]
+
+There is no code book provided, so it was not possible to guess what are all the variables, especially related to the time, and window. Since they may not be very useful in practical application of the prediction model, consequently they were excluded from the analysis. 
+
+The machine learning algorithm utilized random forests with bagging, which gave the most efficient and satisfying results. In the final testing from the Coursera assignment submission website, the prediction accuracy was 95%. The 19 out of 20 testing examples were classified correctly. 
+
+The whole process was handled in the R[@Rsoftware] application using markdown. The packages used in the analysis are: `caret`, `ggplot2`, `dplyr` and for paralleling computation `doParallel`. They have to be installed prior the execution of the script. 
+
+First basic data download and library activation: 
+
+```{r, echo=TRUE, message=FALSE, warning=FALSE}
+#download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",destfile = "training.csv",method = "curl")
+#download.file("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv", destfile = "testing.csv", method = "curl")
+library(dplyr)
+library(reshape2)
+library(caret)
+```
+
+```{r, echo=TRUE}
+data <- read.csv("training.csv", stringsAsFactors= FALSE,na.strings=c(NA,""))
+
+set.seed(834756) # seed
+trainIndex <- createDataPartition(data$classe, p = .8,
+                                  list = FALSE,
+                                  times = 1)
+```
+
+Removing first seven columns, which are are not needed because, they may not carry meaningful information that could useful in the prediction model, and have no practical application in further possible implementation of the method.
+
+```{r}
+df.train <- tbl_df(data[trainIndex,-c(1:7)])
+df.test <- tbl_df(data[-trainIndex,-c(1:7)])
+```
+
+## Exploratory analysis 
+
+```{r, warning=FALSE,message=FALSE}
+m.df <- melt(df.train,id.var="classe" )
+s <- m.df %>%
+  group_by(variable,classe) %>%
+  summarise(N=n(), N.NAs=sum(is.na(value)), AVG=mean(as.numeric(value), na.rm = TRUE), SD=sd(value, na.rm=TRUE))  %>%
+  arrange(classe)
+m.s  <- melt(s)
+names(m.s) <- c("feature","classe","variable","value")
+m.s$value <- round(m.s$value,2)
+su <- dcast(m.s,formula = feature~classe+variable)
+```
+
+Lets see the summary statistics.
+
+The summary statistics are divided by the _class_ type: A-E. Added to the table headings before the underscore. For each of the classes the following summary statistics are calculated: N  <-  number of observations, N.NAs - number of missing observations for each feature, AVG - mean value, SD - standard deviation. 
+
+*******
+```{r,results='asis',echo=FALSE}
+knitr::kable(su)
+```
+
+*******
+Some variables have missing values that consist the majority of the whole training data-set, in consequence they were excluded. Imputation methods would not work well.This automatically helps us to reduce the dimensions of the data-set. 
+
+
+Based on the summary output the next step is to select the features that will be dropped from both training and testing data-sets:
+
+```{r}
+drops <- c(as.character(su[(su$A_N.NAs > 0), 1])) # selecting features with missing values
+training <- df.train[, !(names(df.train) %in% drops)]
+testing <- df.test[, !(names(df.test) %in% drops)]
+```
+
+We finally end-up with a data-set which has `r length(training)-1` features. 
+
+## Data visualization
+
+```{r,fig.height=20, fig.width=20}
+m.t <- melt(training, id.var="classe")
+p <- ggplot(data=m.t, aes(x=value, colour = as.factor(classe), group=classe)) + 
+  geom_density() + facet_wrap(~variable, ncol=10,scales = "free")
+print(p)
+```
+
+The distribution of the variables in many cases is multimodal, and skewed. The units are different for majority of the variables, hence _centring_ and _scaling_ is preferred. The _BoxCox_ transformation was applied since some variables are skewed[@Kuhn:2013]. The treatment was applied on all training variables.
+Moreover, since the data-set has many dimensions and some of the variables are strongly correlated,  it is preferred to reduce the number of features with one of the available methods. In this case I have used the PCA. 
+
+Lets first apply the data which is centered and scaled to the PCA method, to see how many components is able to explain a majority of the variability in the training data-set. 
+
+```{r, message=FALSE}
+preProc <- preProcess(training[,-53], method = c("BoxCox","center", "scale"))  # BoxCox didn't work on Ubuntu 
+for_pca <- predict(preProc,training[,-53])
+tr_pca <-  prcomp(for_pca)
+plot(tr_pca, type ="l")
+```
+ 
+ As we can see the majority of the variability in the data-set is explained by only two principal components. Although we generate more components, and during the process of creating random forest the most important components will be used. 
+Based on try and error method 0.85 threshold level is perceived as the most optimal. The higher threshold improved accuracy by on very small amount, hence I decided to keep it lower to avoid over-fitting. 
+
+## Modeling
+
+```{r}
+preProc <- preProcess(training[,-53], method = c("BoxCox" ,"center", 
+                                                 "scale","pca"), tresh=.85)
+training.x <- predict(preProc,training[,-53]) # 53rd variable is classe outcome 
+# levels are used to be sure the orer is the same for both training and testing
+training.y <- factor(training$classe, levels = LETTERS[1:5]) 
+# same methods applied to the testing dataset
+testing.x <- predict(preProc, testing[,-53])
+testing.y <- factor(testing$classe, levels = LETTERS[1:5] )
+```
+
+Data is prepared for the modeling. As described above, first the variables are scaled and centered and then put trough PCA to reduce dimensions. Finally we get the data-set with `r length(training.x)` features (principal components).
+The testing data set used in this analysis for checking accuracy is transformed in the identical way as the training set. 
+
+
+```{r, message=FALSE, warning=FALSE}
+require(doParallel)
+cl <- makeCluster(8)  # Use 8 cores machine
+registerDoParallel(cl) # register these 2 cores with the "foreach" package
+coreNumber = getDoParWorkers()
+ntree = round(2001/coreNumber) ## optima number of trees in each computation
+ctrl <- trainControl(method = "oob",
+                     number = 10)  #method for training cross-validation #and 10-folds will be created
+rf <- train(x = training.x, y= training.y, method = "rf", ntree= ntree, trControl = ctrl, metric= "Kappa")
+```
+
+```{r, echo=FALSE}
+stopCluster(cl)
+```
+
+Bagging was chosen over the cross-validation for efficiency. With cross-validation the accuracy results were similar up to he second position after the decimal point, however the computation time was much longer. 
+
+
+```{r}
+predictedValues <- predict(rf, testing.x, type="raw")
+conTable<-confusionMatrix(table(predictedValues,testing.y))
+conTable
+varImp(rf)
+varImpPlot(rf$finalModel,main = "Variable importance")
+rf
+```
+
+The most important components appear to be PC 8, PC14, PC12 and PC 1. In the final random forest 2 variables of the training data-set were selected randomly. 
+
+## Final testing and output 
+```{r}
+ft <- read.csv("testing.csv", stringsAsFactors= FALSE,na.strings=c(NA,""))
+# treatment alike the training data set plus one more variable ordering observations
+ft <- tbl_df(ft[-c(1:7,length(ft))]) 
+ftt <- ft[, !(names(ft) %in% drops)]
+final.test <- predict(preProc,ftt) 
+finalPredictions <- predict(rf, final.test, type="raw")
+
+# The function from the coursera assignment page
+pml_write_files = function(x){
+  n = length(x)
+  for(i in 1:n){
+    filename = paste0("problem_id_",i,".txt")
+    write.table(x[i],file=filename,quote=FALSE,row.names=FALSE,col.names=FALSE)
+  }
+}
+
+pml_write_files(finalPredictions)
+```
+
+The accuracy reaches level of 97%, although based on the testing data-set provided in the above code chunk the practical accuracy is on the level of 95%. The final test showed  that 19 out of 20 possible classes were assigned correctly. The third observation was misclassified. 
+
+## References
+
+[project_link]: http://groupware.les.inf.puc-rio.br/har
+ 
+
